@@ -2,6 +2,8 @@
 
 tcp socket 的一个简单封装，原来用于公司生产环境，一直稳定，但并发等没测试过，有心人可以测试一下，并将结果告知一声。
 
+可用于windows,mac,(Linux暂时未测试，理论上mac的mono可以运行，linux也是可以的)
+
 项目总目录：https://github.com/doxgosun/xDM
 
 DLL下载：https://github.com/doxgosun/xDM/tree/master/xBuild
