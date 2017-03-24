@@ -10,33 +10,24 @@ using System.Threading.Tasks;
 
 namespace xDM.xNet.xSockets.xSocket
 {
-    public class TcpClientSocket : IDisposable
+    public class TcpClientSocket :TcpBaseSocket, IDisposable
     {
-        public event Action<string> eShowMsg;
-        /// <summary>
-        /// 接收信息BufferSize
-        /// </summary>
-        public int ReciveBufferSize { get; set; } = 1024 * 1;
-
-        private Socket socket { get; set; } = null;
-
-        public EndPoint RemoteEndPoint { get { return socket?.RemoteEndPoint; } }
-
         private DateTime _lastReceiveTime { get; set; } = DateTime.Now;
         public DateTime LastReceiveTime { get { return _lastReceiveTime; } }
         private bool _ConnectCompleted { get; set; } = false;
         public bool ConnectCompleted { get { return _ConnectCompleted; } }
         /// <summary>
-        /// 处理信息 sender, message
+        /// 显示信息
         /// </summary>
-        public event Action<TcpClientSocket, Message> HandleMessage;
+        public event showMsg eShowMsg;
         /// <summary>
-        /// 处理错误
+        /// 处理发生错误
         /// </summary>
-        public event Action<TcpClientSocket, Exception> onError;
-        ConcurrentDictionary<string, Message> dicSendedMessages { get; set; } = new ConcurrentDictionary<string, Message>();
-        ConcurrentDictionary<string, Message> dicRevivedMessages { get; set; } = new ConcurrentDictionary<string, Message>();
-
+        public event onError OnError;
+        /// <summary>
+        /// 处理接收到的信息sender,remoteEndPoint,Messgae
+        /// </summary>
+        public event clientHandlePackage HandleMessage;
         public TcpClientSocket()
         {
             socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
@@ -89,29 +80,44 @@ namespace xDM.xNet.xSockets.xSocket
             string msg;
             return Connect(ip, port, out msg);
         }
-
+        private Action<TcpClientSocket, Message> _HandleMessage;
         private void Accept_Completed(object sender, SocketAsyncEventArgs e)
         {
             try
             {
-                Socket server = e.AcceptSocket;
-                Socket client = sender as Socket;
-                var t = new Thread(new ParameterizedThreadStart((obj) =>
-                {
-                    var cliectSocket = obj as Socket;
-                    SocketAsyncEventArgs receciveArg = new SocketAsyncEventArgs();
-                    byte[] data = new byte[ReciveBufferSize];
-                    receciveArg.SetBuffer(data, 0, data.Length);
-                    receciveArg.Completed += Rececive_Completed;
-                    cliectSocket.ReceiveAsync(receciveArg);
+                //Socket server = e.AcceptSocket;
+                //Socket client = sender as Socket;
+                //var t = new Thread(new ParameterizedThreadStart((obj) =>
+                //{
+                //    var cliectSocket = obj as Socket;
+                //    SocketAsyncEventArgs receciveArg = new SocketAsyncEventArgs();
+                //    byte[] data = new byte[ReciveBufferSize];
+                //    receciveArg.SetBuffer(data, 0, data.Length);
 
-                }));
-                t.Priority = ThreadPriority.Highest;
-                t.IsBackground = true;
-                t.Start(client);
+                //    var dataHandler = new TcpClientSocketRecivedDataHandler();
+                //    dataHandler.client = this;
+                //    dataHandler.server = server;
+                //    if (_HandleMessage == null)
+                //        _HandleMessage = new Action<TcpClientSocket, Message>((s, msg) =>
+                //        {
+                //            HandleMessage.Invoke(s,msg);
+                //        });
+                //    dataHandler.HandleMessage = _HandleMessage;
+                //    dataHandler.dicSendedMessages = dicSendedPackages;
+                //    dataHandler.dicRevivedMessages = dicRevivedPackages;
+                //    dataHandler.Start();
 
-                eShowMsg?.BeginInvoke("Socket连接成功", null, null);
-                this._ConnectCompleted = true;
+                //    receciveArg.UserToken = dataHandler;
+
+                //    receciveArg.Completed += Rececive_Completed;
+                //    cliectSocket.ReceiveAsync(receciveArg);
+
+                //}));
+                //t.IsBackground = true;
+                //t.Start(client);
+
+                //eShowMsg?.BeginInvoke("Socket连接成功", null, null);
+                //this._ConnectCompleted = true;
             }
             catch
             { }
@@ -120,65 +126,38 @@ namespace xDM.xNet.xSockets.xSocket
         {
             try
             {
-                _lastReceiveTime = DateTime.Now;
-                Socket socket = sender as Socket;
+                Socket clientSocket = sender as Socket;
                 if (e.SocketError == SocketError.Success)
                 {
                     int rec = e.BytesTransferred;
                     if (rec > 0)
                     {
-                        var data = e.Buffer.ToArray();
-                        string reMsg = Encoding.UTF8.GetString(data, 0, rec);
-                        string msgTmp = e.UserToken + "" + reMsg;
-                        //msgTmp = msgTmp + reMsg;
-                        Message[] msgs = MessageExt.GetMessages(msgTmp);
-                        if (msgs.Length > 0)
-                        {
-                            new Action<Message[]>((ms) =>
-                            {
-                                foreach (Message msg in ms)
-                                {
-                                    if (msg.MessageGuid + "" != "")
-                                    {
-                                        Message tmpMsg;
-                                        if (dicSendedMessages.TryRemove(msg.MessageGuid, out tmpMsg))
-                                        {
-                                            dicRevivedMessages.TryAdd(msg.MessageGuid, msg);
-                                        }
-                                    }
-                                    this.HandleMessage?.BeginInvoke(this, msg, null, null);
-                                }
-                            }).BeginInvoke(msgs, null, null);
-
-                            msgTmp = MessageExt.GetStringNotMessage(msgTmp);
-                        }
-                        e.UserToken = msgTmp;
-                    }
-                    else
-                    {
-                        int av = socket.Available;
-                        socket.Close();
-                        socket.Dispose();
-                        e.Dispose();
+                        byte[] tmp = new byte[rec];
+                        Array.Copy(e.Buffer, 0, tmp, 0, rec);
+                        var dataHandler = e.UserToken as TcpClientSocketRecivedDataHandler;
+                        dataHandler.hdData(tmp);
                     }
                 }
-                socket.ReceiveAsync(e);
+                clientSocket.ReceiveAsync(e);
             }
-            catch { }
+            catch
+            {
+            }
         }
         /// <summary>
         /// 异步发送信息
         /// </summary>
         /// <param name="msg"></param>
-        public void SendMessageAsync(Message msg)
+        public bool SendMessageAsync(Message msg)
         {
             try
             {
-                SendAsync(msg.ToSendString());
+                return SendByteAsync(msg.ToSendByte());
             }
             catch (Exception err)
             {
-                onError?.BeginInvoke(this, err, null, null);
+                HandleError(err);
+                return false;
             }
         }
         /// <summary>
@@ -189,76 +168,82 @@ namespace xDM.xNet.xSockets.xSocket
         /// <returns></returns>
         public Message SendMessage(Message msg, int timeOutMillionSecond)
         {
-            if (msg == null)
-            {
-                return msg;
-            }
-            if (timeOutMillionSecond < 0)
-            {
-                timeOutMillionSecond = 10000;
-            }
-            var startTime = DateTime.Now;
-            TimeSpan ts = new TimeSpan(0, 0, 0, 0, timeOutMillionSecond);
-            var guid = msg.MessageGuid;
-            if (guid + "" == "")
-                guid = Guid.NewGuid().ToString("N");
-            while (!dicSendedMessages.TryAdd(guid, msg))
-            {
-                guid = Guid.NewGuid().ToString("N");
-                if ((DateTime.Now - startTime) > ts)
-                {
-                    return null;
-                }
-                Thread.Sleep(10);
-            }
-            var oGuid = msg.MessageGuid;
-            msg.MessageGuid = guid;
-            SendMessageAsync(msg);
-            msg = null;
-            while (!dicRevivedMessages.ContainsKey(guid))
-            {
-                if ((DateTime.Now - startTime) > ts)
-                {
-                    dicSendedMessages.TryRemove(guid, out msg);
-                    msg = null;
-                    return null;
-                }
-                Thread.Sleep(10);
-            }
-            dicRevivedMessages.TryRemove(guid, out msg);
-            if (msg != null)
-            {
-                msg.MessageGuid = oGuid;
-            }
+            //if (msg == null)
+            //{
+            //    return msg;
+            //}
+            //if (timeOutMillionSecond < 0)
+            //{
+            //    timeOutMillionSecond = 10000;
+            //}
+            //var startTime = DateTime.Now;
+            //TimeSpan ts = new TimeSpan(0, 0, 0, 0, timeOutMillionSecond);
+            //var guid = msg.GetGuid();
+            //if (guid == Guid.Empty)
+            //    guid = Guid.NewGuid();
+            //while (!dicSendedPackages.TryAdd(guid, msg))
+            //{
+            //    guid = Guid.NewGuid();
+            //    if ((DateTime.Now - startTime) > ts)
+            //    {
+            //        return null;
+            //    }
+            //    Thread.Sleep(10);
+            //}
+            //var oGuid = msg.GetGuid();
+            //msg.SetGuid(guid);
+            //SendMessageAsync(msg);
+            //msg = null;
+            //while (!dicRevivedPackages.ContainsKey(guid))
+            //{
+            //    if ((DateTime.Now - startTime) > ts)
+            //    {
+            //        dicSendedPackages.TryRemove(guid, out msg);
+            //        msg = null;
+            //        return null;
+            //    }
+            //    Thread.Sleep(10);
+            //}
+            //dicRevivedPackages.TryRemove(guid, out msg);
+            //if (msg != null)
+            //{
+            //    msg.SetGuid(oGuid);
+            //}
             return msg;
         }
 
-        private void SendAsync(string msgPro)
-        {
-            byte[] data = Encoding.UTF8.GetBytes(msgPro);
-            SendByteAsync(data);
-        }
-        private void SendByteAsync(byte[] data)
+        private bool SendByteAsync(byte[] data)
         {
             try
             {
-                SocketAsyncEventArgs sendArg = SocketAsyncEventArgsPool.SendPool.Get();
+                SocketAsyncEventArgs sendArg = SocketAsyncEventArgsPool.SendPool.Pop();
                 sendArg.SetBuffer(data, 0, data.Length);
-                socket.SendAsync(sendArg);
+                return socket.SendAsync(sendArg);
             }
             catch (Exception err)
             {
-                onError?.BeginInvoke(this, err, null, null);
+                HandleError(err);
                 if (err.GetType() == typeof(SocketException))
                 {
 
                 }
+                return false;
             }
         }
 
         public void Dispose()
         {
             socket.Dispose();
+        }
+
+		protected override void SendByteAsyncFailed(Socket worksocket, string message)
+		{
+			
+		}
+
+        protected override void HandleError(Exception err)
+        {
+            OnError?.BeginInvoke(this, err, null, null);
         }
     }
 }

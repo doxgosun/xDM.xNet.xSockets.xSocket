@@ -11,59 +11,39 @@ using xDM.xNet.xSockets.xSocket.Extensions;
 
 namespace xDM.xNet.xSockets.xSocket
 {
-    public class TcpServerSocket : IDisposable
+    public class TcpServerSocket :TcpBaseSocket, IDisposable
     {
-
-        Socket socket { get; set; } = null;
-        public EndPoint RemoteEndPoint { get { return socket?.RemoteEndPoint; } }
-
         /// <summary>
         /// 显示信息
         /// </summary>
-        public event Action<string> eShowMsg;
-
-        /// <summary>
-        /// 处理接收到的信息sender,remoteEndPoint,Messgae
-        /// </summary>
-        public event Action<TcpServerSocket, string, Message> HandleMessage;
+        public event showMsg eShowMsg;
         /// <summary>
         /// 处理发生错误
         /// </summary>
-        public event Action<object, Exception> onError;
+        public event onError OnError;
         /// <summary>
-        /// 发送BufferSize
+        /// 处理接收到的信息sender,remoteEndPoint,Messgae
         /// </summary>
-        public int SendBufferSize { get; set; } = 1024;
+        public event serverHandlePackage HandleMessage;
         /// <summary>
-        /// 接收BufferSize
+        /// 客户端空闲时间(毫秒)，默认一分钟（60000）,超过则断开连接
         /// </summary>
-        public int ReciveBufferSize { get; set; } = 1024 * 2;
-        /// <summary>
-        /// 客户端空闲时间，默认一分钟（60000）,超过则断开连接
-        /// </summary>
-        public int ClientTimeOutMillionSecond { get; set; } = 60000;
+        public int ClientTimeOutMillionSecond { get; set; } = 20000;
         /// <summary>
         /// 连接数
         /// </summary>
-        public int ClientCount { get { return ClientSocketDic.Count; } }
+        public int ClientCount { get { return ClientInfosDic.Count; } }
         /// <summary>
         /// 所有连接的客户端，RemoteEndPoint，Socket,DateTime
         /// </summary>
-        protected ConcurrentDictionary<string, KeyValuePair<Socket, DateTime>> ClientSocketDic { get; set; } = new ConcurrentDictionary<string, KeyValuePair<Socket, DateTime>>();
+        protected ConcurrentDictionary<Socket, UserToken> ClientInfosDic { get; set; } = new ConcurrentDictionary<Socket, UserToken>();
+        protected ConcurrentDictionary<string, Socket> ClientSocketsDic { get; set; } = new ConcurrentDictionary<string, Socket>();
 
-        protected ConcurrentDictionary<string, TcpServerSocketRecivedDataHandler> ClientRecHandlers { get; set; } = new ConcurrentDictionary<string, TcpServerSocketRecivedDataHandler>();
-        /// <summary>
-        /// 发送信息缓存
-        /// </summary>
-        ConcurrentDictionary<string, Message> dicSendedMessages { get; set; } = new ConcurrentDictionary<string, Message>();
-        /// <summary>
-        /// 接收信息缓存
-        /// </summary>
-        ConcurrentDictionary<string, Message> dicRevivedMessages { get; set; } = new ConcurrentDictionary<string, Message>();
+        private bool _exit = false;
 
         public TcpServerSocket()
         {
-            socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+			socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
         }
         /// <summary>
         /// 绑定端口号
@@ -78,7 +58,7 @@ namespace xDM.xNet.xSockets.xSocket
                 socket.Bind(serverIp);
                 return true;
             }
-            catch (Exception err)
+            catch
             {
                 return false;
             }
@@ -126,9 +106,9 @@ namespace xDM.xNet.xSockets.xSocket
         public void Listen(int backlog)
         {
             socket.Listen(backlog);
-            Thread tWatcher = new Thread(Watcher);
-            tWatcher.IsBackground = true;
-            tWatcher.Start();
+            Thread tDaemon = new Thread(DaemonThreadStart);
+            tDaemon.IsBackground = true;
+            tDaemon.Start();
             SocketAsyncEventArgs acceptArg = new SocketAsyncEventArgs();
             acceptArg.Completed += AcceptArg_Completed;
             socket.AcceptAsync(acceptArg);
@@ -138,41 +118,55 @@ namespace xDM.xNet.xSockets.xSocket
         /// </summary>
         public void Listen()
         {
-            Listen(1024);
+            Listen(65534);
         }
+
+        private Action<TcpServerSocket, string, byte[]> _HandlePackage;
 
         private void NewClientAccept(object oClientSocket)
         {
             Socket clientSocket = oClientSocket as Socket;
             try
             {
-                if (ClientSocketDic.TryAdd(clientSocket.RemoteEndPoint.ToString(), new KeyValuePair<Socket, DateTime>(clientSocket, DateTime.Now)))
+                UserToken userToken = UserToken.Pop();
+                if (ClientInfosDic.TryAdd(clientSocket, userToken) && ClientSocketsDic.TryAdd(clientSocket.RemoteEndPoint + "",clientSocket))
                 {
-                    eShowMsg?.BeginInvoke($"客户端上线，RemoteEndPoint：{clientSocket.RemoteEndPoint}", null, null);
-                    SocketAsyncEventArgs reciveArgs = new SocketAsyncEventArgs();
+                    eShowMsg?.Invoke($"客户端上线，RemoteEndPoint：{clientSocket.RemoteEndPoint}");
+                    userToken.socket = clientSocket;
+                    userToken.LastWorkingTime = DateTime.Now;
+                    if (userToken.ReciveArgs == null)
+                    {
+                        userToken.ReciveArgs = new SocketAsyncEventArgs();
+                        userToken.ReciveArgs.Completed += ReciveArgs_Completed;
+                        userToken.ReciveHandler.server = this;
+                        if (_HandlePackage == null)
+                            _HandlePackage = new Action<TcpServerSocket, string, byte[]>((sender, remoteEndPoint, msg) =>
+                            {
+                                HandleMessage.Invoke(sender, remoteEndPoint, msg);
+                            });
+                        userToken.ReciveHandler.HandlePackage = _HandlePackage;
+                        userToken.ReciveHandler.dicSendedMessages = dicSendedPackages;
+                        userToken.ReciveHandler.dicRevivedMessages = dicRevivedPackages;
+                        userToken.ReciveHandler.ClientSocketDic = ClientInfosDic;
+                        userToken.ReciveArgs.UserToken = userToken;
+                    }
+
+                    userToken.ReciveHandler.clientSocket = clientSocket;
+                    userToken.ReciveHandler.Start();
                     byte[] data = new byte[ReciveBufferSize];
-                    reciveArgs.SetBuffer(data, 0, data.Length);
-                    var dataHandler = new TcpServerSocketRecivedDataHandler();
-                    dataHandler.server = this;
-                    dataHandler.HandleMessage = this.HandleMessage;
-                    dataHandler.dicSendedMessages = dicSendedMessages;
-                    dataHandler.dicRevivedMessages = dicRevivedMessages;
-                    dataHandler.ClientSocketDic = ClientSocketDic;
-                    dataHandler.clientSocket = clientSocket;
-                    ClientRecHandlers.TryAdd(clientSocket.RemoteEndPoint.ToString(), dataHandler);
-                    reciveArgs.UserToken = dataHandler;
-                    reciveArgs.Completed += Recive_Completed;
-                    clientSocket.ReceiveAsync(reciveArgs);
+                    userToken.ReciveArgs.SetBuffer(data, 0, data.Length);
+                    userToken.ReciveArgs.AcceptSocket = clientSocket;
+                    clientSocket.ReceiveAsync(userToken.ReciveArgs);
                 }
                 else
                 {
-                    clientSocket.Shutdown(SocketShutdown.Both);
-                    clientSocket.Close();
-                    clientSocket.Dispose();
+                    DisposeClient(clientSocket,"加入客户端队列失败！");
                 }
             }
-            catch
+            catch(Exception err)
             {
+                DisposeClient(clientSocket,err.Message);
+                OnError?.Invoke(this,err);
             }
         }
 
@@ -180,52 +174,82 @@ namespace xDM.xNet.xSockets.xSocket
         {
             Socket socket = sender as Socket;
             Socket clientSocket = e.AcceptSocket;
-            Thread client = new Thread(new ParameterizedThreadStart(NewClientAccept));
-            client.IsBackground = true;
-            client.Start(clientSocket);
-            SocketAsyncEventArgs acceptArg = new SocketAsyncEventArgs();
-            acceptArg.Completed += AcceptArg_Completed;
-            socket.AcceptAsync(acceptArg);
-            eShowMsg?.BeginInvoke("AcceptArg_Completed", null, null);
-        }
-        private void Recive_Completed(object sender, SocketAsyncEventArgs e)
-        {
+            e.AcceptSocket = null;
             try
             {
-                Socket clientSocket = sender as Socket;
+                socket.AcceptAsync(e);
+            }
+            catch (Exception err)
+            {
+                SocketAsyncEventArgs acceptArg = new SocketAsyncEventArgs();
+                acceptArg.Completed += AcceptArg_Completed;
+                socket.AcceptAsync(acceptArg);
+                OnError?.Invoke(this, err);
+            }
+            NewClientAccept(clientSocket);
+        }
+
+        private void ReciveArgs_Completed(object sender, SocketAsyncEventArgs e)
+        {
+            Socket clientSocket = sender as Socket;
+            try
+            {
                 if (e.SocketError == SocketError.Success)
                 {
                     int rec = e.BytesTransferred;
                     if (rec > 0)
                     {
-                        var data = e.Buffer.ToArray();
-                        byte[] tmp = new byte[rec];
-                        data.CopyTo(tmp, 0, rec);
-                        var dataHandler = e.UserToken as TcpServerSocketRecivedDataHandler;
-                        dataHandler.dataQueue.Enqueue(tmp);
+                        byte[] d = new byte[rec];
+                        Array.Copy(e.Buffer, 0, d,0, rec);
+                        var userToken = e.UserToken as UserToken;
+                        userToken.ReciveHandler.hdData(d);
+                    }
+                    if (!clientSocket.Connected || !clientSocket.ReceiveAsync(e))
+                    {
+                        e.AcceptSocket = null;
+                        DisposeClient(clientSocket, "连接已断开");
                     }
                 }
-                clientSocket.ReceiveAsync(e);
             }
-            catch
+            catch(Exception err)
             {
+                DisposeClient(clientSocket,err.Message);
+                OnError?.Invoke(this, err);
             }
         }
+        private Socket GetClientSocket(string remoteEndPoint)
+        {
+            Socket clientSocket;
+            ClientSocketsDic.TryGetValue(remoteEndPoint, out clientSocket);
+            return clientSocket;
+        }
+
+        private UserToken GetClientInfo(string remoteEndPoint)
+        {
+            Socket sk = GetClientSocket(remoteEndPoint);
+            if (sk == null)
+                return null;
+            UserToken ci;
+            ClientInfosDic.TryGetValue(sk, out ci);
+            return ci;
+        }
+
         /// <summary>
         /// 异步给所有客户端发送信息
         /// </summary>
         /// <param name="msg"></param>
         public int SendMessageAsync(Message msg)
         {
-            new Action<Message>((m) =>
+            if (msg == null)
+                return 0;
+            int sendedCount = 0;
+            var reps = ClientInfosDic.Keys.ToArray();
+            foreach (var item in reps)
             {
-                var reps = ClientSocketDic.Keys.ToArray();
-                foreach (var item in reps)
-                {
-                    SendMessageAsync(item, msg);
-                }
-            }).BeginInvoke(msg, null, null);
-            return ClientSocketDic.Count;
+                if (SendByteAsync(item, msg.ToSendByte()))
+                    sendedCount++;
+            }
+            return sendedCount;
         }
 
         /// <summary>
@@ -235,52 +259,54 @@ namespace xDM.xNet.xSockets.xSocket
         /// <param name="msg"></param>
         /// <param name="timeOutMillionSecond"></param>
         /// <returns></returns>
-        public Message SendMessage(string remoteEndPoint, Message msg, int timeOutMillionSecond)
-        {
-            if (msg == null)
-            {
-                return msg;
-            }
-            if (timeOutMillionSecond < 0)
-            {
-                timeOutMillionSecond = 10000;
-            }
-            var startTime = DateTime.Now;
-            TimeSpan ts = new TimeSpan(0, 0, 0, 0, timeOutMillionSecond);
-            var guid = msg.MessageGuid;
-            if (guid + "" == "")
-            {
-                guid = Guid.NewGuid().ToString("N");
-            }
-            while (!dicSendedMessages.TryAdd(guid, msg))
-            {
-                guid = Guid.NewGuid().ToString("N");
-                if ((DateTime.Now - startTime) > ts)
-                {
-                    return null;
-                }
-                Thread.Sleep(10);
-            }
-            var oGuid = msg.MessageGuid;
-            msg.MessageGuid = guid;
-            SendMessageAsync(remoteEndPoint, msg);
-            msg = null;
-            while (!dicRevivedMessages.TryRemove(guid, out msg))
-            {
-                if ((DateTime.Now - startTime) > ts)
-                {
-                    if (dicSendedMessages.TryRemove(guid, out msg))
-                        msg = null;
-                    return null;
-                }
-                Thread.Sleep(10);
-            }
-            if (msg != null)
-            {
-                msg.MessageGuid = oGuid;
-            }
-            return msg;
-        }
+		//public bool SendMessage(string remoteEndPoint, Message msg,out Message resultMsg, int timeOutMillionSecond)
+  //      {
+		//	resultMsg = null;
+  //          if (msg == null)
+  //          {
+		//		return false;
+  //          }
+  //          if (timeOutMillionSecond < 0)
+  //          {
+  //              timeOutMillionSecond = 10000;
+  //          }
+  //          var startTime = DateTime.Now;
+  //          TimeSpan ts = new TimeSpan(0, 0, 0, 0, timeOutMillionSecond);
+  //          var guid = msg.GetGuid();
+  //          if (guid == Guid.Empty)
+  //          {
+  //              guid = Guid.NewGuid();
+  //              msg.SetGuid(guid);
+  //          }
+  //          while (!dicSendedPackages.TryAdd(guid, msg))
+  //          {
+  //              guid = Guid.NewGuid();
+  //              if ((DateTime.Now - startTime) > ts)
+  //              {
+		//			return false;
+  //              }
+  //              Thread.Sleep(10);
+  //          }
+  //          var oGuid = msg.GetGuid();
+  //          msg.SetGuid(guid);
+  //          SendMessageAsync(remoteEndPoint, msg);
+		//	while (!dicRevivedPackages.TryRemove(guid, out resultMsg))
+  //          {
+  //              if ((DateTime.Now - startTime) > ts)
+  //              {
+		//			if (dicSendedPackages.TryRemove(guid, out resultMsg))
+		//				resultMsg = null;
+		//			return false;
+  //              }
+  //              Thread.Sleep(10);
+  //          }
+		//	if (resultMsg != null)
+  //          {
+		//		resultMsg.SetGuid(oGuid);
+		//		return true;
+  //          }
+		//	return false;
+  //      }
 
         /// <summary>
         /// 异步给指定的客户端发送信息
@@ -288,97 +314,97 @@ namespace xDM.xNet.xSockets.xSocket
         /// <param name="remoteEndPoint">客户端的remoteEndPoint</param>
         /// <param name="msg"></param>
         /// <returns></returns>
-        public void SendMessageAsync(string remoteEndPoint, Message msg)
+		public bool SendMessageAsync(string remoteEndPoint, Message msg)
         {
-            KeyValuePair<Socket, DateTime> kv;
-            try
-            {
-                if (ClientSocketDic.TryGetValue(remoteEndPoint, out kv))
-                {
-                    SendByteAsync(kv.Key, msg.ToSendByte());
-                    Thread.Sleep(1);
-                }
-            }
-            catch (Exception err)
-            {
-                onError?.BeginInvoke(this, err, null, null);
-                ClientSocketDic.TryRemove(remoteEndPoint, out kv);
-                TcpServerSocketRecivedDataHandler hder;
-                if (ClientRecHandlers.TryRemove(remoteEndPoint, out hder))
-                {
-                    hder.Quit = true;
-                }
-                eShowMsg?.BeginInvoke($"SendMessage错误！RemoteEndPoint:{remoteEndPoint},Error:{err.Message}", null, null);
-            }
+            return SendDataAsync(remoteEndPoint, msg.ToSendByte());
         }
 
-        private void SendAsync(Socket worksocket, string message)
+        public bool SendDataAsync(string remoteEndPoint, byte[] data)
         {
-            if (worksocket == null)
-            {
-                return;
-            }
-            byte[] data = Encoding.UTF8.GetBytes(message);
-            SendByteAsync(worksocket, data);
-        }
-        private void SendByteAsync(Socket worksocket, byte[] data)
-        {
-            try
-            {
-                SocketAsyncEventArgs sendArg = SocketAsyncEventArgsPool.SendPool.Get();
-                sendArg.SetBuffer(data, 0, data.Length);
-                worksocket.SendAsync(sendArg);
-            }
-            catch (Exception err)
-            {
-                onError?.BeginInvoke(this, err, null, null);
-                if (err.GetType() == typeof(SocketException))
-                {
-
-                }
-            }
+            var clientSocket = GetClientSocket(remoteEndPoint);
+            if (clientSocket != null && data != null)
+                return SendByteAsync(clientSocket, data);
+            return false;
         }
 
 
-        private void Watcher()
+
+        private void DaemonThreadStart()
         {
-            while (true)
+            while (!_exit)
             {
                 try
                 {
-                    var remoteEndPoints = ClientSocketDic.Keys.ToArray();
-                    foreach (var remoteEndPoint in remoteEndPoints)
+                    var clientInfos = ClientInfosDic.Values.ToArray();
+                    foreach (var ci in clientInfos)
                     {
-                        KeyValuePair<Socket, DateTime> kv;
-                        if (ClientSocketDic.TryGetValue(remoteEndPoint, out kv))
-                        {
-                            DateTime lastReceiveTime = kv.Value;
-                            if ((DateTime.Now - lastReceiveTime).TotalMilliseconds > 60000)
-                            {
-                                try
-                                {
-                                    if (ClientSocketDic.TryRemove(remoteEndPoint, out kv))
-                                    {
-                                        eShowMsg?.BeginInvoke($"强行中止长时间无响应连接：{kv.Key.RemoteEndPoint}", null, null);
-                                        kv.Key.Shutdown(SocketShutdown.Both);
-                                        kv.Key.Close();
-                                        kv.Key.Dispose();
-                                    }
-                                }
-                                catch { }
-                            }
-                        }
+                        if (_exit)
+                            break;
+                        if (!ci.socket.Connected)
+                            DisposeClient(ci.socket, "连接已断开");
+                        if ((DateTime.Now - ci.LastWorkingTime).TotalMilliseconds > this.ClientTimeOutMillionSecond)
+                            DisposeClient(ci.socket, "连接超时");
                     }
-
                 }
-                catch { }
+                catch (Exception err)
+                {
+                    OnError?.Invoke(this, err);
+                }
                 Thread.Sleep(100);
+            }
+        }
+
+        private void DisposeClient(Socket worksocket,string message)
+        {
+            if (worksocket == null)
+                return;
+            message = "断开连接：" + message;
+            try
+            {
+                UserToken ci = null;
+                if (ClientInfosDic.TryRemove(worksocket, out ci) && ci != null)
+                {
+                    eShowMsg?.Invoke($"{message}，{ci?.RemoteEndPoint}");
+                    ci?.ReciveHandler?.Stop();
+                    UserToken.Push(ci);
+                    ClientSocketsDic.TryRemove(ci.RemoteEndPoint,out worksocket);
+                }
+                else
+                {
+                    try
+                    {
+                        eShowMsg?.Invoke($"{message}，{worksocket?.RemoteEndPoint}");
+                    }
+                    catch
+                    {
+                        eShowMsg?.Invoke($"{message}，{worksocket}");
+                    }
+                }
+                GC.Collect();
+                //worksocket.Shutdown(SocketShutdown.Both);
+                worksocket?.Close();
+                worksocket?.Dispose();
+            }
+            catch(Exception err)
+            {
+                OnError?.Invoke(this, err);
             }
         }
 
         public void Dispose()
         {
-            socket.Dispose();
+            _exit = true;
+			socket.Dispose();
+        }
+
+		protected override void SendByteAsyncFailed(Socket worksocket, string message)
+		{
+			DisposeClient(worksocket, message);
+		}
+
+        protected override void HandleError(Exception err)
+        {
+            OnError?.Invoke(this, err);
         }
     }
 }

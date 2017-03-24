@@ -10,40 +10,39 @@ namespace xDM.xNet.xSockets.xSocket
 {
     public static class MessageExt
     {
-        public static string ToSendString(this Message msg)
-        {
-            return $"<Message>{msg.Serializable()}</Message>";
-        }
 
         public static byte[] ToSendByte(this Message msg)
         {
-            return Encoding.UTF8.GetBytes(msg.ToSendString());
+            //包格式：（包头-6字节48位）（包体）
+            //包格式：（1111 1111）（00）（10 1111 ... 1111）（1011）（11。。00011）
+            //包说明：开始标志0xff 包类型       包长度         校验       数据体  
+            //其中：开始标志 8位：固定为0xff
+            //      包类型   2位：00 Message 01文件 10数据 11心跳,心跳包包长度为0，并且没有数据体
+            //      包长度  30位：最大为1G 数据类型的包包长度表示数据大小，文件包表示文件编号
+            //      校验     8位：b[5] = (b[1]+b[2]+b[3]+b[4])/4
+            if (msg == null) return null;
+            var bytes = msg.SerializeToByte();
+            var len = bytes.Length;
+            if (len > Math.Pow(2, 30))
+                throw new Exception("对象大小超过1G!");
+            byte[] sendBytes = new byte[len + 6];
+            sendBytes[0] = 0xff;
+            sendBytes[1] = (byte)((len & 0x3f000000) >> 24);
+            sendBytes[2] = (byte)((len & 0xff0000) >> 16);
+            sendBytes[3] = (byte)((len & 0xff00) >> 8);
+            sendBytes[4] = (byte)(len & 0xff);
+            sendBytes[5] = (byte)((sendBytes[1] + sendBytes[2] + sendBytes[3] + sendBytes[4]) / 4);
+            Array.Copy(bytes, 0, sendBytes, 6, len);
+            return sendBytes;
         }
 
         //以下静态方法
         #region 静态方法
-        private static Regex regMsg = new Regex(@"<Message>(.*?)</Message>");
-        private static Regex regNotMsg = new Regex(@"<Message>.*</Message>(.*)");
 
-        private static Regex regMsgStart = new Regex(@"<Message>(.*)");
-        private static Regex regMsgEnd = new Regex(@"(.*)</Message>");
-        private static string strMsgStart = "<Message>";
-        private static string strMsgEnd = "</Message>";
-        public static Message GetMessage(string SerializableString)
-        {
-            if (SerializableString == null || SerializableString == "") return null;
-            try
-            {
-                return SerializableString.DeDeserialize<Message>();
-            }
-            catch
-            {
-                return null;
-            }
-        }
         public static Message GetMessage(byte[] SerializableBytes)
         {
-            if (SerializableBytes == null || SerializableBytes.Length == 0) return null;
+            if (SerializableBytes == null || SerializableBytes.Length == 0)
+                return null;
             try
             {
                 return SerializableBytes.DeDeserialize<Message>();
@@ -52,57 +51,6 @@ namespace xDM.xNet.xSockets.xSocket
             {
                 return null;
             }
-        }
-        /// <summary>
-        /// 这里会丢弃 sender,action,value,guid 同时为空的值
-        /// </summary>
-        /// <param name="msg"></param>
-        /// <returns></returns>
-        public static Message[] GetMessages(string strMsg)
-        {
-            List<Message> kvList = new List<Message>();
-            StringBuilder sb = new StringBuilder();
-            var matchs = regMsg.Matches(strMsg);
-            int count = matchs.Count;
-            for (int i = 0; i < count; i++)
-            {
-                var m = matchs[i];
-                string strTmp = m.Groups[1].Value;
-                int iStart = strTmp.LastIndexOf(strMsgStart);
-                int iEnd = strTmp.IndexOf(strMsgEnd);
-                iStart = iStart == -1 ? 0 : iStart + strMsgStart.Length;
-                iEnd = iEnd == -1 ? strTmp.Length : iEnd;
-                strTmp = strTmp.Substring(iStart, iEnd - iStart);
-                sb.Clear();
-                //sb.Append(strMsgStart);
-                sb.Append(strTmp);
-                //sb.Append(strMsgEnd);
-                try
-                {
-                    Message msg = GetMessage(sb.ToString());
-                    if (msg.Action == "" && msg.Value == "" && msg.Sender == "" && msg.MessageGuid == "")
-                        continue;
-                    kvList.Add(msg);
-                }
-                catch { }
-            }
-            return kvList.ToArray();
-        }
-        /// <summary>
-        /// 获取message格式的string中不是完成message格式的部分
-        /// </summary>
-        /// <param name="msg"></param>
-        /// <returns></returns>
-        public static string GetStringNotMessage(string msg)
-        {
-            if (msg == null || msg == "") return "";
-            var ms = regNotMsg.Matches(msg);
-            try
-            {
-                msg = ms?[0]?.Groups?[1]?.Value;
-            }
-            catch { }
-            return msg;
         }
         #endregion
     }

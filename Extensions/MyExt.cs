@@ -20,23 +20,30 @@ namespace xDM.xNet.xSockets.xSocket.Extensions
             return targetArray;
         }
         /// <summary>
-        /// 序列化
+        /// 序列化类对象
         /// </summary>
-        /// <param name="t"></param>
-        /// <returns></returns>
-        public static string Serializable(this object t)
+        /// <typeparam name="T">类名</typeparam>
+        /// <param name="obj">类实例</param>
+        /// <returns>类的序列化字符串</returns>
+        public static string Serializable(this object obj)
         {
-            if (t == null) return "";
-            IFormatter formatter = new BinaryFormatter();
-            MemoryStream ms = new MemoryStream();
-            byte[] b;
-            formatter.Serialize(ms, t);
-            ms.Position = 0;
-            b = new byte[ms.Length];
-            ms.Read(b, 0, b.Length);
-            ms.Close();
-            ms.Dispose();
+            var b = obj.SerializeToByte();
             return Convert.ToBase64String(b);
+        }
+
+        public static byte[] SerializeToByte(this object obj)
+        {
+            if (obj == null)
+                return null;
+			using (MemoryStream ms = new MemoryStream())
+			{
+				BinaryFormatter formatter = new BinaryFormatter();
+				formatter.Serialize(ms, obj);
+				ms.Position = 0;
+				byte[] bytes = new byte[ms.Length];
+				ms.Read(bytes, 0, bytes.Length);
+				return bytes;
+			}
         }
         /// <summary>
         /// 反序列化
@@ -50,12 +57,13 @@ namespace xDM.xNet.xSockets.xSocket.Extensions
         }
         public static T DeDeserialize<T>(this byte[] bytes)
         {
-            MemoryStream ms = new MemoryStream(bytes);
-            ms.Position = 0;
-            BinaryFormatter formatter = new BinaryFormatter();
-            T obj = (T)formatter.Deserialize(ms);
-            ms.Close();
-            return obj;
+			using (MemoryStream ms = new MemoryStream(bytes))
+			{
+				ms.Position = 0;
+				BinaryFormatter formatter = new BinaryFormatter();
+				T obj = (T)formatter.Deserialize(ms);
+				return obj;
+			}
         }
     }
 }
